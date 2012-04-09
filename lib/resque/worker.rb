@@ -218,7 +218,9 @@ module Resque
     # Not every platform supports fork. Here we do our magic to
     # determine if yours does.
     def fork
-      @cant_fork = true if $TESTING
+      # We disable forking because we run tasks very quickly and don't have any
+      # weird memory growth problems.
+      @cant_fork = true
 
       return if @cant_fork
 
