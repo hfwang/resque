@@ -1,8 +1,6 @@
 require 'test_helper'
 
 describe "Resque" do
-  include Test::Unit::Assertions
-
   before do
     Resque.redis.flushall
 
@@ -115,11 +113,11 @@ describe "Resque" do
 
     assert Resque::Job.create(:jobs, 'SomeMethodJob', 20, '/tmp')
     assert Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
-    assert_not_equal Resque.reserve(:jobs), Resque.reserve(:jobs)
+    refute_equal Resque.reserve(:jobs), Resque.reserve(:jobs)
 
     assert Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
     assert Resque::Job.create(:jobs, 'SomeJob', 30, '/tmp')
-    assert_not_equal Resque.reserve(:jobs), Resque.reserve(:jobs)
+    refute_equal Resque.reserve(:jobs), Resque.reserve(:jobs)
   end
 
   it "can put jobs on a queue by way of a method" do
@@ -263,8 +261,8 @@ describe "Resque" do
   end
 
   it "decode bad json" do
-    assert_raises Resque::Helpers::DecodeException do
-      Resque.decode("{\"error\":\"Module not found \\u002\"}")
+    assert_raises Resque::DecodeException do
+      Resque.coder.decode("{\"error\":\"Module not found \\u002\"}")
     end
   end
 
@@ -276,5 +274,19 @@ describe "Resque" do
     ensure
       Resque.inline = false
     end
+  end
+
+  it "inlining jobs in inline job" do
+    begin
+      Resque.inline = true
+      Resque.enqueue(NestedJob)
+      assert_equal 0, Resque.size(:ivar)
+    ensure
+      Resque.inline = false
+    end
+  end
+
+  it 'treats symbols and strings the same' do
+    assert_equal Resque.queue(:people), Resque.queue('people')
   end
 end

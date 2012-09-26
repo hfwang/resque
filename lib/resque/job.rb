@@ -32,6 +32,7 @@ module Resque
     def initialize(queue, payload)
       @queue = queue
       @payload = payload
+      @failure_hooks_ran = false
     end
 
     # Creates a job by placing it on a queue. Expects a string queue
@@ -43,9 +44,11 @@ module Resque
       Resque.validate(klass, queue)
 
       if Resque.inline?
-        constantize(klass).perform(*decode(encode(args)))
+        # Instantiating a Resque::Job and calling perform on it so callbacks run
+        # decode(encode(args)) to ensure that args are normalized in the same manner as a non-inline job
+        new(:inline, {'class' => klass, 'args' => decode(encode(args))}).perform
       else
-        Resque.push(queue, :class => klass.to_s, :args => args)
+        Resque.push(queue, 'class' => klass.to_s, 'args' => args)
       end
     end
 
@@ -85,7 +88,7 @@ module Resque
           end
         end
       else
-        destroyed += redis.lrem(queue, 0, encode(:class => klass, :args => args))
+        destroyed += redis.lrem(queue, 0, encode('class' => klass, 'args' => args))
       end
 
       destroyed
@@ -108,7 +111,7 @@ module Resque
 
       begin
         # Execute before_perform hook. Abort the job gracefully if
-        # Resque::DontPerform is raised.
+        # Resque::Job::DontPerform is raised.
         begin
           before_hooks.each do |hook|
             job.send(hook, *job_args)
@@ -163,6 +166,13 @@ module Resque
       @payload_class ||= constantize(@payload['class'])
     end
 
+    # returns true if payload_class does not raise NameError
+    def has_payload_class?
+      payload_class != Object
+    rescue NameError
+      false
+    end
+
     # Returns an array of args represented in this job's payload.
     def args
       @payload['args']
@@ -171,7 +181,7 @@ module Resque
     # Given an exception object, hands off the needed parameters to
     # the Failure module.
     def fail(exception)
-      run_failure_hooks(exception)
+      run_failure_hooks(exception) if has_payload_class?
       Failure.create \
         :payload   => payload,
         :exception => exception,
@@ -210,14 +220,17 @@ module Resque
       @after_hooks ||= Plugin.after_hooks(payload_class)
     end
 
-    def failure_hooks 
+    def failure_hooks
       @failure_hooks ||= Plugin.failure_hooks(payload_class)
     end
-    
-    def run_failure_hooks(exception)
-      job_args = args || []
-      failure_hooks.each { |hook| payload_class.send(hook, exception, *job_args) }
-    end
 
+    def run_failure_hooks(exception)
+      begin
+        job_args = args || []
+        failure_hooks.each { |hook| payload_class.send(hook, exception, *job_args) } unless @failure_hooks_ran
+      ensure
+        @failure_hooks_ran = true
+      end
+    end
   end
 end

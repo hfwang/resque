@@ -2,8 +2,6 @@ require 'test_helper'
 require 'resque/queue'
 
 describe "Resque::Queue" do
-  include Test::Unit::Assertions
-
   class Thing
     attr_reader :inside
 
@@ -14,6 +12,10 @@ describe "Resque::Queue" do
     def == other
       super || @inside == other.inside
     end
+  end
+
+  before do
+    Resque.redis.flushall
   end
 
   it "generates a redis_name" do
@@ -39,6 +41,14 @@ describe "Resque::Queue" do
   end
 
   it "nonblocking pop works" do
+    queue1 = q
+    x      = Thing.new
+
+    queue1 << x
+    assert_equal x, queue1.pop
+  end
+
+  it "nonblocking pop doesn't block" do
     queue1 = q
 
     assert_raises ThreadError do
@@ -79,11 +89,43 @@ describe "Resque::Queue" do
     end
   end
 
-  def q
-    Resque::Queue.new 'foo', backend
+  it "registers itself with Resque" do
+    q
+
+    assert_equal ["foo"], Resque.queues
   end
 
-  def backend
-    Redis::Namespace.new :resque, :redis => Resque.redis
+  it "cleans up after itself when destroyed" do
+    queue = q
+    queue << Thing.new
+    q.destroy
+
+    assert_equal [], Resque.queues
+    assert !Resque.redis.exists(queue.redis_name)
+  end
+
+  it "returns false if a queue is not destroyed" do
+    assert !q.destroyed?
+  end
+
+  it "returns true if a queue is destroyed" do
+    queue1 = q
+    queue1.destroy
+    assert queue1.destroyed?
+  end
+
+  it "can't push to queue after destroying it" do
+    queue1 = q
+    x      = Thing.new
+    queue1 << x
+    queue1.destroy
+
+    assert_raises Resque::QueueDestroyed do
+      queue1 << x
+    end
+  end
+
+  def q
+    Resque::Queue.new 'foo', Resque.redis
   end
 end

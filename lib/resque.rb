@@ -13,6 +13,11 @@ require 'resque/job'
 require 'resque/worker'
 require 'resque/plugin'
 require 'resque/queue'
+require 'resque/multi_queue'
+require 'resque/coder'
+require 'resque/json_coder'
+
+require 'resque/vendor/utf8_util'
 
 module Resque
   include Helpers
@@ -45,15 +50,22 @@ module Resque
       @redis = Redis::Namespace.new(:resque, :redis => server)
     end
     @queues = Hash.new { |h,name|
-      h[name] = Resque::Queue.new(name, @redis, self)
+      h[name] = Resque::Queue.new(name, @redis, coder)
     }
   end
+
+  # Encapsulation of encode/decode. Overwrite this to use it across Resque.
+  # This defaults to JSON for backwards compatibilty.
+  def coder
+    @coder ||= JsonCoder.new
+  end
+  attr_writer :coder
 
   # Returns the current Redis connection. If none has been created, will
   # create a new one.
   def redis
     return @redis if @redis
-    self.redis = Redis.respond_to?(:connect) ? Redis.connect : "localhost:6379"
+    self.redis = Redis.respond_to?(:connect) ? Redis.connect(:thread_safe => true) : "localhost:6379"
     self.redis
   end
 
@@ -73,41 +85,68 @@ module Resque
   # changes you make will be permanent for the lifespan of the
   # worker.
   #
-  # Call with a block to set the hook.
-  # Call with no arguments to return the hook.
+  # Call with a block to register a hook.
+  # Call with no arguments to return all registered hooks.
   def before_first_fork(&block)
-    block ? (@before_first_fork = block) : @before_first_fork
+    block ? register_hook(:before_first_fork, block) : hooks(:before_first_fork)
   end
 
-  # Set a proc that will be called in the parent process before the
-  # worker forks for the first time.
-  attr_writer :before_first_fork
+  # Register a before_first_fork proc.
+  def before_first_fork=(block)
+    register_hook(:before_first_fork, block)
+  end
 
   # The `before_fork` hook will be run in the **parent** process
   # before every job, so be careful- any changes you make will be
   # permanent for the lifespan of the worker.
   #
-  # Call with a block to set the hook.
-  # Call with no arguments to return the hook.
+  # Call with a block to register a hook.
+  # Call with no arguments to return all registered hooks.
   def before_fork(&block)
-    block ? (@before_fork = block) : @before_fork
+    block ? register_hook(:before_fork, block) : hooks(:before_fork)
   end
 
-  # Set the before_fork proc.
-  attr_writer :before_fork
+  # Register a before_fork proc.
+  def before_fork=(block)
+    register_hook(:before_fork, block)
+  end
 
   # The `after_fork` hook will be run in the child process and is passed
   # the current job. Any changes you make, therefore, will only live as
   # long as the job currently being processed.
   #
-  # Call with a block to set the hook.
-  # Call with no arguments to return the hook.
+  # Call with a block to register a hook.
+  # Call with no arguments to return all registered hooks.
   def after_fork(&block)
-    block ? (@after_fork = block) : @after_fork
+    block ? register_hook(:after_fork, block) : hooks(:after_fork)
   end
 
-  # Set the after_fork proc.
-  attr_writer :after_fork
+  # Register an after_fork proc.
+  def after_fork=(block)
+    register_hook(:after_fork, block)
+  end
+
+  # The `before_pause` hook will be run in the parent process before the
+  # worker has paused processing (via #pause_processing or SIGUSR2).
+  def before_pause(&block)
+    block ? register_hook(:before_pause, block) : hooks(:before_pause)
+  end
+
+  # Register a before_pause proc.
+  def before_pause=(block)
+    register_hook(:before_pause, block)
+  end
+
+  # The `after_pause` hook will be run in the parent process after the
+  # worker has paused (via SIGCONT).
+  def after_pause(&block)
+    block ? register_hook(:after_pause, block) : hooks(:after_pause)
+  end
+
+  # Register an after_pause proc.
+  def after_pause=(block)
+    register_hook(:after_pause, block)
+  end
 
   def to_s
     "Resque Client connected to #{redis_id}"
@@ -127,7 +166,7 @@ module Resque
   # Pushes a job onto a queue. Queue name should be a string and the
   # item should be any JSON-able Ruby object.
   #
-  # Resque works generally expect the `item` to be a hash with the following
+  # Resque workers generally expect the `item` to be a hash with the following
   # keys:
   #
   #   class - The String name of the job to run.
@@ -136,11 +175,11 @@ module Resque
   #
   # Example
   #
-  #   Resque.push('archive', :class => 'Archive', :args => [ 35, 'tar' ])
+  #   Resque.push('archive', 'class' => 'Archive', 'args' => [ 35, 'tar' ])
   #
   # Returns nothing
   def push(queue, item)
-    @queues[queue] << item
+    queue(queue) << item
   end
 
   # Pops a job off a queue. Queue name should be a string.
@@ -148,7 +187,7 @@ module Resque
   # Returns a Ruby object.
   def pop(queue)
     begin
-      @queues[queue].pop(true)
+      queue(queue).pop(true)
     rescue ThreadError
       nil
     end
@@ -157,7 +196,7 @@ module Resque
   # Returns an integer representing the size of a queue.
   # Queue name should be a string.
   def size(queue)
-    @queues[queue].size
+    queue(queue).size
   end
 
   # Returns an array of items currently queued. Queue name should be
@@ -169,7 +208,7 @@ module Resque
   # To get the 3rd page of a 30 item, paginatied list one would use:
   #   Resque.peek('my_list', 59, 30)
   def peek(queue, start = 0, count = 1)
-    @queues[queue].slice start, count
+    queue(queue).slice start, count
   end
 
   # Does the dirty work of fetching a range of items from a Redis list
@@ -191,8 +230,13 @@ module Resque
 
   # Given a queue name, completely deletes the queue.
   def remove_queue(queue)
-    redis.srem(:queues, queue.to_s)
-    @queues[queue].destroy
+    queue(queue).destroy
+    @queues.delete(queue.to_s)
+  end
+
+  # Return the Resque::Queue object for a given name
+  def queue(name)
+    @queues[name.to_s]
   end
 
 
@@ -365,6 +409,30 @@ module Resque
     redis.keys("*").map do |key|
       key.sub("#{redis.namespace}:", '')
     end
+  end
+
+  private
+
+  # Register a new proc as a hook. If the block is nil this is the
+  # equivalent of removing all hooks of the given name.
+  #
+  # `name` is the hook that the block should be registered with.
+  def register_hook(name, block)
+    return clear_hooks(name) if block.nil?
+
+    @hooks ||= {}
+    @hooks[name] ||= []
+    @hooks[name] << block
+  end
+
+  # Clear all hooks given a hook name.
+  def clear_hooks(name)
+    @hooks && @hooks[name] = []
+  end
+
+  # Retrieve all hooks of a given name.
+  def hooks(name)
+    (@hooks && @hooks[name]) || []
   end
 end
 

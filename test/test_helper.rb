@@ -1,15 +1,14 @@
 require 'rubygems'
-
-dir = File.dirname(File.expand_path(__FILE__))
-$LOAD_PATH.unshift dir + '/../lib'
-$TESTING = true
-require 'mocha'
+require 'timeout'
+require 'bundler/setup'
+require 'redis/namespace'
 require 'minitest/unit'
 require 'minitest/spec'
-require 'test/unit'
 
-require 'redis/namespace'
+$dir = File.dirname(File.expand_path(__FILE__))
+$LOAD_PATH.unshift $dir + '/../lib'
 require 'resque'
+$TESTING = true
 
 #
 # make sure we can run redis
@@ -30,30 +29,26 @@ end
 at_exit do
   next if $!
 
-  if defined?(MiniTest)
-    exit_code = MiniTest::Unit.new.run(ARGV)
-  else
-    exit_code = Test::Unit::AutoRunner.run
-  end
+  exit_code = MiniTest::Unit.new.run(ARGV)
 
-  processes = `ps -A -o pid,command | grep [r]edis-test`.split("\n")
+  processes = `ps -A -o pid,command | grep [r]edis-test`.split($/)
   pids = processes.map { |process| process.split(" ")[0] }
   puts "Killing test redis server..."
-  `rm -f #{dir}/dump.rdb #{dir}/dump-cluster.rdb`
-  pids.each { |pid| Process.kill("KILL", pid.to_i) }
+  pids.each { |pid| Process.kill("TERM", pid.to_i) }
+  system("rm -f #{$dir}/dump.rdb #{$dir}/dump-cluster.rdb")
   exit exit_code
 end
 
 if ENV.key? 'RESQUE_DISTRIBUTED'
   require 'redis/distributed'
   puts "Starting redis for testing at localhost:9736 and localhost:9737..."
-  `redis-server #{dir}/redis-test.conf`
-  `redis-server #{dir}/redis-test-cluster.conf`
+  `redis-server #{$dir}/redis-test.conf`
+  `redis-server #{$dir}/redis-test-cluster.conf`
   r = Redis::Distributed.new(['redis://localhost:9736', 'redis://localhost:9737'])
   Resque.redis = Redis::Namespace.new :resque, :redis => r
 else
   puts "Starting redis for testing at localhost:9736..."
-  `redis-server #{dir}/redis-test.conf`
+  `redis-server #{$dir}/redis-test.conf`
   Resque.redis = 'localhost:9736'
 end
 
@@ -79,6 +74,13 @@ end
 
 class SomeIvarJob < SomeJob
   @queue = :ivar
+end
+
+class NestedJob
+  @queue = :nested
+  def self.perform
+    Resque.enqueue(SomeIvarJob, 20, '/tmp')
+  end
 end
 
 class SomeMethodJob < SomeJob
