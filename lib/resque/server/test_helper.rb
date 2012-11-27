@@ -7,7 +7,14 @@ module Resque
       include Rack::Test::Methods
       def app
         Resque::Server.new
-      end 
+      end
+
+      def add_failed_jobs
+        Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(:test), :queue => "queue", :payload => {'class' => 'TestClass'})
+        Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(:test), :queue => "queue", :payload => {'class' => 'TestClass'})
+        Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(:test), :queue => "queue", :payload => {'class' => 'TestClass'})
+        Resque::Failure.create(:exception => Exception.new, :worker => Resque::Worker.new(:test), :queue => "queue", :payload => {'class' => 'TestClass'})
+      end
 
       def self.should_respond_with_success
         it "should respond with success" do

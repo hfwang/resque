@@ -36,7 +36,7 @@ describe "Resque" do
   end
 
   it "can grab jobs off a queue" do
-    Resque::Job.create(:jobs, 'some-job', 20, '/tmp')
+    Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
 
     job = Resque.reserve(:jobs)
 
@@ -47,7 +47,7 @@ describe "Resque" do
   end
 
   it "can re-queue jobs" do
-    Resque::Job.create(:jobs, 'some-job', 20, '/tmp')
+    Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
 
     job = Resque.reserve(:jobs)
     job.recreate
@@ -80,9 +80,9 @@ describe "Resque" do
     assert Resque.enqueue(SomeIvarJob, 20, '/tmp')
     assert_equal 5, Resque.size(:ivar)
 
-    assert Resque.dequeue(SomeIvarJob, 30, '/tmp')
+    assert_equal 1, Resque.dequeue(SomeIvarJob, 30, '/tmp')
     assert_equal 4, Resque.size(:ivar)
-    assert Resque.dequeue(SomeIvarJob)
+    assert_equal 3, Resque.dequeue(SomeIvarJob)
     assert_equal 1, Resque.size(:ivar)
   end
 
@@ -108,7 +108,7 @@ describe "Resque" do
 
   it "jobs can it for equality" do
     assert Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
-    assert Resque::Job.create(:jobs, 'some-job', 20, '/tmp')
+    assert Resque::Job.create(:jobs, 'SomeJob', 20, '/tmp')
     assert_equal Resque.reserve(:jobs), Resque.reserve(:jobs)
 
     assert Resque::Job.create(:jobs, 'SomeMethodJob', 20, '/tmp')
@@ -181,25 +181,25 @@ describe "Resque" do
   end
 
   it "can peek at a queue" do
-    assert_equal({ 'name' => 'chris' }, Resque.peek(:people))
+    assert_equal([{ 'name' => 'chris' }], Resque.peek(:people))
     assert_equal 3, Resque.size(:people)
   end
 
   it "can peek multiple items on a queue" do
-    assert_equal({ 'name' => 'bob' }, Resque.peek(:people, 1, 1))
+    assert_equal([{ 'name' => 'bob' }], Resque.peek(:people, 1, 1))
 
     assert_equal([{ 'name' => 'bob' }, { 'name' => 'mark' }], Resque.peek(:people, 1, 2))
     assert_equal([{ 'name' => 'chris' }, { 'name' => 'bob' }], Resque.peek(:people, 0, 2))
     assert_equal([{ 'name' => 'chris' }, { 'name' => 'bob' }, { 'name' => 'mark' }], Resque.peek(:people, 0, 3))
-    assert_equal({ 'name' => 'mark' }, Resque.peek(:people, 2, 1))
-    assert_equal nil, Resque.peek(:people, 3)
+    assert_equal([{ 'name' => 'mark' }], Resque.peek(:people, 2, 1))
+    assert_equal [], Resque.peek(:people, 3)
     assert_equal [], Resque.peek(:people, 3, 2)
   end
 
   it "knows what queues it is managing" do
     assert_equal %w( people ), Resque.queues
     Resque.push(:cars, { 'make' => 'bmw' })
-    assert_equal %w( cars people ), Resque.queues
+    assert_equal %w( cars people ), Resque.queues.sort
   end
 
   it "queues are always a list" do
@@ -209,7 +209,7 @@ describe "Resque" do
 
   it "can delete a queue" do
     Resque.push(:cars, { 'make' => 'bmw' })
-    assert_equal %w( cars people ), Resque.queues
+    assert_equal %w( cars people ), Resque.queues.sort
     Resque.remove_queue(:people)
     assert_equal %w( cars ), Resque.queues
     assert_equal nil, Resque.pop(:people)

@@ -9,14 +9,9 @@ module Resque
   # It also ensures workers are always listening to signals from you,
   # their master, and can react accordingly.
   class Worker
+    extend  Resque::Helpers
     include Resque::Helpers
-    extend Resque::Helpers
-
-    # Whether the worker should log basic info to STDOUT
-    attr_accessor :verbose
-
-    # Whether the worker should log lots of info to STDOUT
-    attr_accessor  :very_verbose
+    include Resque::Logging
 
     # Boolean indicating whether this worker can or can not fork.
     # Automatically set if a fork(2) fails.
@@ -135,12 +130,11 @@ module Resque
         pause if should_pause?
 
         if job = reserve(interval)
-          log "got: #{job.inspect}"
+          Resque.logger.info "got: #{job.inspect}"
           job.worker = self
-          run_hook :before_fork, job
           working_on job
 
-          if @child = fork
+          if @child = fork(job)
             srand # Reseeding
             procline "Forked #{@child} at #{Time.now.to_i}"
             begin
@@ -148,19 +142,20 @@ module Resque
             rescue SystemCallError
               nil
             end
+            job.fail(DirtyExit.new($?.to_s)) if $?.signaled?
           else
-            unregister_signal_handlers if !@cant_fork
+            unregister_signal_handlers if will_fork?
             procline "Processing #{job.queue} since #{Time.now.to_i}"
             reconnect
             perform(job, &block)
-            exit! unless @cant_fork
+            exit!(true) if will_fork?
           end
 
           done_working
           @child = nil
         else
           break if interval.zero?
-          log! "Timed out after #{interval} seconds"
+          Resque.logger.debug "Timed out after #{interval} seconds"
           procline paused? ? "Paused" : "Waiting for #{@queues.join(',')}"
         end
       end
@@ -185,18 +180,20 @@ module Resque
     # Processes a given job in the child.
     def perform(job)
       begin
-        run_hook :after_fork, job
+        run_hook :after_fork, job if will_fork?
+        run_hook :before_perform, job
         job.perform
+        run_hook :after_perform, job
       rescue Object => e
-        log "#{job.inspect} failed: #{e.inspect}"
+        Resque.logger.info "#{job.inspect} failed: #{e.inspect}"
         begin
           job.fail(e)
         rescue Object => e
-          log "Received exception when reporting failure: #{e.inspect}"
+          Resque.logger.info "Received exception when reporting failure: #{e.inspect}"
         end
         failed!
       else
-        log "done: #{job.inspect}"
+        Resque.logger.info "done: #{job.inspect}"
       ensure
         yield job if block_given?
       end
@@ -220,7 +217,7 @@ module Resque
         queue, job = multi_queue.poll(interval.to_i)
       end
 
-      log! "Found job on #{queue}"
+      Resque.logger.debug "Found job on #{queue}"
       Job.new(queue.name, job) if queue && job
     end
 
@@ -232,11 +229,11 @@ module Resque
         redis.client.reconnect
       rescue Redis::BaseConnectionError
         if (tries += 1) <= 3
-          log "Error reconnecting to Redis; retrying"
+          Resque.logger.info "Error reconnecting to Redis; retrying"
           sleep(tries)
           retry
         else
-          log "Error reconnecting to Redis; quitting"
+          Resque.logger.info "Error reconnecting to Redis; quitting"
           raise
         end
       end
@@ -260,10 +257,14 @@ module Resque
 
       return if @cant_fork
 
+      # Only run before_fork hooks if we're actually going to fork
+      # (after checking @cant_fork)
+      run_hook :before_fork, job if will_fork?
+
       begin
         # IronRuby doesn't support `Kernel.fork` yet
         if Kernel.respond_to?(:fork)
-          Kernel.fork
+          Kernel.fork if will_fork?
         else
           raise NotImplementedError
         end
@@ -314,7 +315,7 @@ module Resque
         warn "Signals QUIT, USR1, USR2, and/or CONT not supported."
       end
 
-      log! "Registered signals"
+      Resque.logger.debug "Registered signals"
     end
 
     def unregister_signal_handlers
@@ -332,7 +333,7 @@ module Resque
     # Schedule this worker for shutdown. Will finish processing the
     # current job.
     def shutdown
-      log 'Exiting...'
+      Resque.logger.info 'Exiting...'
       @shutdown = true
     end
 
@@ -353,20 +354,20 @@ module Resque
     def kill_child
       if @child
         unless Process.waitpid(@child, Process::WNOHANG)
-          log! "Sending TERM signal to child #{@child}"
+          Resque.logger.debug "Sending TERM signal to child #{@child}"
           Process.kill("TERM", @child)
           (term_timeout.to_f * 10).round.times do |i|
             sleep(0.1)
             return if Process.waitpid(@child, Process::WNOHANG)
           end
-          log! "Sending KILL signal to child #{@child}"
+          Resque.logger.debug "Sending KILL signal to child #{@child}"
           Process.kill("KILL", @child)
         else
-          log! "Child #{@child} already quit."
+          Resque.logger.debug "Child #{@child} already quit."
         end
       end
     rescue SystemCallError
-      log! "Child #{@child} already quit and reaped."
+      Resque.logger.debug "Child #{@child} already quit and reaped."
     end
 
     # are we paused?
@@ -378,7 +379,7 @@ module Resque
     def pause
       rd, wr = IO.pipe
       trap('CONT') {
-        log "CONT received; resuming job processing"
+        Resque.logger.info "CONT received; resuming job processing"
         @paused = false
         wr.write 'x'
         wr.close
@@ -392,7 +393,7 @@ module Resque
     # Stop processing jobs after the current one has completed (if we're
     # currently running one).
     def pause_processing
-      log "USR2 received; pausing job processing"
+      Resque.logger.info "USR2 received; pausing job processing"
       @paused = true
     end
 
@@ -413,7 +414,7 @@ module Resque
         host, pid, queues = worker.id.split(':')
         next unless host == hostname
         next if known_workers.include?(pid)
-        log! "Pruning dead worker: #{worker}"
+        Resque.logger.debug "Pruning dead worker: #{worker}"
         worker.unregister_worker
       end
     end
@@ -430,7 +431,7 @@ module Resque
       return unless hooks = Resque.send(name)
       msg = "Running #{name} hooks"
       msg << " with #{args.inspect}" if args.any?
-      log msg
+      Resque.logger.info msg
 
       hooks.each do |hook|
         args.any? ? hook.call(*args) : hook.call
@@ -522,6 +523,10 @@ module Resque
       state == :idle
     end
 
+    def will_fork?
+      !(@cant_fork || $TESTING)
+    end
+
     # Returns a symbol representing the current worker state,
     # which can be either :working or :idle
     def state
@@ -559,7 +564,7 @@ module Resque
       if RUBY_PLATFORM =~ /solaris/
         solaris_worker_pids
       elsif RUBY_PLATFORM =~ /mingw32/
-        windows_worker_pids     
+        windows_worker_pids
       else
         linux_worker_pids
       end
@@ -593,33 +598,20 @@ module Resque
        active_worker_pids = []
        output = %x[#{command}]  # output format of ps must be ^<PID> <COMMAND WITH ARGS>
        raise 'System call for ps command failed. Please make sure that you have a compatible ps command in the path!' unless $?.success?
-       output.split($/).each{|line| 
+       output.split($/).each{|line|
         next unless line =~ /resque/i
         next if line =~ /resque-web/
         active_worker_pids.push line.split(' ')[0]
        }
        active_worker_pids
     end
-    
+
     # Given a string, sets the procline ($0) and logs.
     # Procline is always in the format of:
     #   resque-VERSION: STRING
     def procline(string)
       $0 = "resque-#{Resque::Version}: #{string}"
-      log! $0
-    end
-
-    # Log a message to STDOUT if we are verbose or very_verbose.
-    def log(message)
-      if verbose || very_verbose
-        time = Time.now.strftime('%H:%M:%S %Y-%m-%d')
-        puts "** [#{time}] #$$: #{message}"
-      end
-    end
-
-    # Logs a very verbose message to STDOUT.
-    def log!(message)
-      log message if very_verbose
+      Resque.logger.debug $0
     end
   end
 end
